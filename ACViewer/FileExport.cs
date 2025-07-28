@@ -1,10 +1,11 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Numerics;
 using System.Text;
+using System.Globalization;
 
 /*using Aspose.ThreeD;
 using Aspose.ThreeD.Animation;
@@ -28,6 +29,7 @@ using ACViewer.View;
 using Matrix4x4 = System.Numerics.Matrix4x4;
 using UkooLabs.FbxSharpie.Tokens.Value;
 using UkooLabs.FbxSharpie.Tokens;
+using ACViewer.Data;
 
 namespace ACViewer
 {
@@ -1056,6 +1058,208 @@ namespace ACViewer
 
                 if (node.Nodes.Length > 0)
                     ShowNodes(node.Nodes, node, level + 1);
+            }
+        }
+
+        /// <summary>
+        /// Export a CSV containing a mapping of Setup IDs to their associated visual metadata.
+        /// Each row of the CSV contains the Setup ID (in hex), the list of clothing base IDs that
+        /// reference this setup (pipe‐separated, also in hex), the list of texture IDs used by the
+        /// setup's parts (pipe‐separated, in hex), and the list of gfx object IDs (parts) which
+        /// compose the setup (pipe‐separated, in hex).  If a field has no data it will be left
+        /// blank.  The output file will be written to the current working directory with the
+        /// filename "AC_Visual_Library.csv".  Status is written to the MainWindow when complete.
+        ///
+        /// This routine will attempt to load all setups defined in the DIDTables and will cross
+        /// reference any clothing tables discovered via the LootArmor list to determine which
+        /// clothing bases reference each setup.  It also uses DatManager to resolve gfx objects
+        /// and surfaces in order to collect texture IDs.  Errors reading individual records will
+        /// be caught and logged, ensuring the export continues for the remainder of the data.
+        /// </summary>
+        public static void ExportAllVisualMappings()
+        {
+            // Ensure the DIDTables are loaded so that we have a complete list of setup IDs.
+            try
+            {
+                // Load setup table if not already populated
+                if (DIDTables.Setups == null || DIDTables.Setups.Count == 0)
+                    DIDTables.Load();
+            }
+            catch (Exception ex)
+            {
+                // If DIDTables fails to load we cannot continue.
+                MainWindow.Instance.AddStatusText($"Error loading DID tables: {ex.Message}");
+                return;
+            }
+
+            // Load the LootArmor list which provides us with a list of clothing base IDs.  These
+            // clothing bases are later used to determine which setups they affect via the
+            // ClothingTable.ClothingBaseEffects dictionary.
+            try
+            {
+                if (LootArmorList.Loot == null || LootArmorList.Loot.Count == 0)
+                    LootArmorList.Load();
+            }
+            catch (Exception ex)
+            {
+                // If the loot list fails to load we will still proceed, but no clothing data
+                // will be available.
+                MainWindow.Instance.AddStatusText($"Warning: could not load LootArmor list: {ex.Message}");
+            }
+
+            // Build a lookup from Setup ID to one or more clothing base IDs by scanning each
+            // clothing table referenced in the LootArmor list.  Each clothing base ID (DID) is
+            // converted from its hex string representation before being read from the DAT.
+            var setupToClothing = new Dictionary<uint, List<uint>>();
+
+            // Collect unique clothing base IDs from the loot list
+            var clothingIds = new HashSet<uint>();
+            foreach (var kvp in LootArmorList.Loot)
+            {
+                var lootItem = kvp.Value;
+                if (string.IsNullOrWhiteSpace(lootItem.ClothingBase))
+                    continue;
+                if (uint.TryParse(lootItem.ClothingBase, System.Globalization.NumberStyles.HexNumber, null, out var cbid))
+                    clothingIds.Add(cbid);
+            }
+
+            // Scan each unique clothing table to determine which setups it references
+            foreach (var cbid in clothingIds)
+            {
+                try
+                {
+                    var clothingTable = DatManager.PortalDat.ReadFromDat<ACE.DatLoader.FileTypes.ClothingTable>(cbid);
+                    if (clothingTable == null)
+                        continue;
+                    // ClothingBaseEffects maps setup IDs to clothing effects for that base.  We
+                    // only need the keys here.
+                    foreach (var setupId in clothingTable.ClothingBaseEffects.Keys)
+                    {
+                        if (!setupToClothing.TryGetValue(setupId, out var list))
+                        {
+                            list = new List<uint>();
+                            setupToClothing[setupId] = list;
+                        }
+                        // Avoid duplicates in the list
+                        if (!list.Contains(cbid))
+                            list.Add(cbid);
+                    }
+                }
+                catch
+                {
+                    // Ignore any clothing tables we cannot read
+                    continue;
+                }
+            }
+
+            var sb = new StringBuilder();
+            // CSV header
+            sb.AppendLine("SetupID,ClothingBaseIDs,TextureIDs,GfxObjIDs");
+
+            // Iterate over every setup ID defined in DIDTables
+            foreach (var entry in DIDTables.Setups)
+            {
+                var setupId = entry.Key;
+                // Retrieve clothing base IDs for this setup if available
+                string clothingList = "";
+                if (setupToClothing.TryGetValue(setupId, out var cbList) && cbList != null && cbList.Count > 0)
+                {
+                    clothingList = string.Join("|", cbList.Distinct().Select(c => c.ToString("X8")));
+                }
+
+                // Gather gfx object part IDs and texture IDs for this setup
+                var partIds = new List<uint>();
+                var textureIds = new HashSet<uint>();
+                try
+                {
+                    var setupModel = DatManager.PortalDat.ReadFromDat<ACE.DatLoader.FileTypes.SetupModel>(setupId);
+                    if (setupModel != null)
+                    {
+                        // Parts is a List<uint> of gfx object IDs
+                        var parts = setupModel.Parts;
+                        if (parts != null)
+                        {
+                            foreach (var part in parts)
+                            {
+                                if (part != 0)
+                                    partIds.Add(part);
+                            }
+                        }
+                        // For each unique part, gather texture IDs by scanning its surfaces
+                        foreach (var partId in partIds.Distinct())
+                        {
+                            try
+                            {
+                                var gfxObj = DatManager.PortalDat.ReadFromDat<ACE.DatLoader.FileTypes.GfxObj>(partId);
+                                if (gfxObj == null)
+                                    continue;
+                                // Surfaces is a List<uint> of surface IDs
+                                if (gfxObj.Surfaces != null)
+                                {
+                                    foreach (var surfId in gfxObj.Surfaces)
+                                    {
+                                        try
+                                        {
+                                            var surface = DatManager.PortalDat.ReadFromDat<ACE.DatLoader.FileTypes.Surface>(surfId);
+                                            if (surface == null)
+                                                continue;
+                                            // OrigTextureId is the texture referenced by this surface
+                                            uint tid = 0;
+                                            try
+                                            {
+                                                tid = surface.OrigTextureId;
+                                            }
+                                            catch
+                                            {
+                                                // If OrigTextureId property is unavailable, fall back to reflection
+                                                var surfType = surface.GetType();
+                                                var prop = surfType.GetProperty("OrigTextureId");
+                                                if (prop != null && prop.PropertyType == typeof(uint))
+                                                {
+                                                    tid = (uint)prop.GetValue(surface);
+                                                }
+                                            }
+                                            if (tid != 0)
+                                                textureIds.Add(tid);
+                                        }
+                                        catch
+                                        {
+                                            // ignore errors loading surface
+                                            continue;
+                                        }
+                                    }
+                                }
+                            }
+                            catch
+                            {
+                                // ignore errors reading gfx objects
+                                continue;
+                            }
+                        }
+                    }
+                }
+                catch
+                {
+                    // skip setups we cannot load
+                }
+
+                // Convert lists to pipe‐separated hex strings
+                string partList = partIds.Count > 0 ? string.Join("|", partIds.Distinct().Select(id => id.ToString("X8"))) : "";
+                string textureList = textureIds.Count > 0 ? string.Join("|", textureIds.Select(id => id.ToString("X8"))) : "";
+
+                sb.AppendLine($"{setupId:X8},{clothingList},{textureList},{partList}");
+            }
+
+            // Write the CSV file to disk
+            var outFile = "AC_Visual_Library.csv";
+            try
+            {
+                File.WriteAllText(outFile, sb.ToString());
+                MainWindow.Instance.AddStatusText($"Wrote {outFile}");
+            }
+            catch (Exception ex)
+            {
+                MainWindow.Instance.AddStatusText($"Error writing {outFile}: {ex.Message}");
             }
         }
     }

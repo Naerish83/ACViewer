@@ -1,4 +1,4 @@
-﻿using System.ComponentModel;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Text;
@@ -15,6 +15,7 @@ using ACViewer.Config;
 using ACViewer.Data;
 using ACViewer.Enum;
 using ACViewer.Render;
+using ACViewer; // for FileExport
 
 namespace ACViewer.View
 {
@@ -400,6 +401,25 @@ namespace ACViewer.View
         {
             var armorWindow = new ArmorList();
             armorWindow.ShowDialog();
+        }
+
+        /// <summary>
+        /// Handles clicking the "Export Visual Library" menu item.  This calls into
+        /// FileExport.ExportAllVisualMappings to perform the heavy lifting of
+        /// enumerating all setups, gathering their associated visual metadata and
+        /// writing the results to a CSV file.  See FileExport.ExportAllVisualMappings
+        /// for further details on what is exported and where the output is written.
+        /// </summary>
+        private void ExportVisualLibrary_Click(object sender, RoutedEventArgs e)
+        {
+            // Ensure that a DAT has been loaded before attempting export
+            if (DatManager.PortalDat == null)
+            {
+                MainWindow.Instance.AddStatusText("Please load a DAT file before exporting the visual library.");
+                return;
+            }
+
+            FileExport.ExportAllVisualMappings();
         }
     }
 }
